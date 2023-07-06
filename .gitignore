@@ -13,7 +13,7 @@
 data/
 log/
 .idea/
-vendor/
+# vendor/
 config.yml
 host_key
 cmd/koko

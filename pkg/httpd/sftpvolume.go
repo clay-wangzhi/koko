@@ -3,7 +3,9 @@ package httpd
 import (
 	"fmt"
 	"io"
+	"net/url"
 	"os"
+	pathv1 "path"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -11,21 +13,59 @@ import (
 
 	"github.com/LeeEirc/elfinder"
 	"github.com/pkg/sftp"
+	"k8s.io/client-go/kubernetes"
 
 	"github.com/jumpserver/koko/pkg/jms-sdk-go/model"
 	"github.com/jumpserver/koko/pkg/jms-sdk-go/service"
 	"github.com/jumpserver/koko/pkg/logger"
+	"github.com/jumpserver/koko/pkg/podtool"
 	"github.com/jumpserver/koko/pkg/srvconn"
 )
 
 func NewUserVolume(jmsService *service.JMService, user *model.User, addr, hostId string) *UserVolume {
 	var userSftp *srvconn.UserSftpConn
+	var containerOptions *srvconn.ContainerOptions
+	var isPod bool
 	homename := "Home"
 	basePath := "/"
-	switch hostId {
-	case "":
+	switch {
+	case hostId == "":
+		isPod = false
 		userSftp = srvconn.NewUserSftpConn(jmsService, user, addr)
+	case strings.Contains(hostId, "namespace"):
+		logger.Debug("NewUserVolume hostId is:", hostId)
+		isPod = true
+		u, err := url.Parse("?" + hostId)
+		if err != nil {
+			logger.Errorf("url parse failed: %s", err)
+		}
+		uuid := u.Query().Get("app_id")
+		podname := u.Query().Get("pod")
+		namespace := u.Query().Get("namespace")
+		container := u.Query().Get("container")
+		systemUserId := u.Query().Get("system_user_id")
+		systemUserAuthInfo, err := jmsService.GetUserApplicationAuthInfo(systemUserId, uuid, user.ID, user.Name)
+		if err != nil {
+			logger.Errorf("Get systemuser auth info failed: %s", err)
+		}
+		application, err := jmsService.GetApplicationById(uuid)
+		if err != nil {
+			logger.Errorf("Get application failed: %s", err)
+		}
+		homename = podname
+		basePath = filepath.Join("/", homename)
+		containerOptions = &srvconn.ContainerOptions{
+			Host:          application.Attrs.Cluster,
+			Token:         systemUserAuthInfo.Token,
+			PodName:       podname,
+			Namespace:     namespace,
+			ContainerName: container,
+			IsSkipTls:     true,
+		}
+
+		userSftp = srvconn.NewUserContainerWithPod(jmsService, user, addr, containerOptions)
 	default:
+		isPod = false
 		assets, err := jmsService.GetUserAssetByID(user.ID, hostId)
 		if err != nil {
 			logger.Errorf("Get user asset failed: %s", err)
@@ -48,6 +88,8 @@ func NewUserVolume(jmsService *service.JMService, user *model.User, addr, hostId
 		basePath:      basePath,
 		chunkFilesMap: make(map[int]*sftp.File),
 		lock:          new(sync.Mutex),
+		IsPod:         isPod,
+		PodConn:       containerOptions,
 	}
 	return uVolume
 }
@@ -60,10 +102,30 @@ type UserVolume struct {
 
 	chunkFilesMap map[int]*sftp.File
 	lock          *sync.Mutex
+	IsPod         bool
+	PodConn       *srvconn.ContainerOptions
+}
+
+func (u *UserVolume) IsPods() bool {
+	return u.IsPod
 }
 
 func (u *UserVolume) ID() string {
 	return u.Uuid
+}
+
+func (u *UserVolume) PodInfo(path string) (elfinder.FileDir, error) {
+	var dirs elfinder.FileDir
+	if path == "/" {
+		return u.RootFileDir(), nil
+	}
+	pt, err := GetPodTool(u.PodConn)
+	if err != nil {
+		logger.Errorf("err is %s", err)
+	}
+	dirs, err = pt.DirInfo(path, u.Uuid)
+	return dirs, err
+
 }
 
 func (u *UserVolume) Info(path string) (elfinder.FileDir, error) {
@@ -103,6 +165,34 @@ func (u *UserVolume) Info(path string) (elfinder.FileDir, error) {
 		rest.Dirs = 0
 	}
 	return rest, err
+}
+
+func GetPodTool(podconn *srvconn.ContainerOptions) (podtool.PodTool, error) {
+	var pt podtool.PodTool
+	k8sCfg := podconn.K8sCfg()
+	clientset, err := kubernetes.NewForConfig(k8sCfg)
+	if err != nil {
+		return pt, err
+	}
+	pt = podtool.PodTool{
+		Namespace:     podconn.Namespace,
+		PodName:       podconn.PodName,
+		ContainerName: podconn.ContainerName,
+		K8sClient:     clientset,
+		RestClient:    k8sCfg,
+	}
+
+	return pt, nil
+}
+
+func (u *UserVolume) PodFileList(path string) []elfinder.FileDir {
+	dirs := make([]elfinder.FileDir, 0)
+	pt, err := GetPodTool(u.PodConn)
+	if err != nil {
+		logger.Errorf("err is %s", err)
+	}
+	dirs = pt.ListFiles(path, u.Uuid)
+	return dirs
 }
 
 func (u *UserVolume) List(path string) []elfinder.FileDir {
@@ -154,6 +244,33 @@ func (u *UserVolume) Parents(path string, dep int) []elfinder.FileDir {
 	return dirs
 }
 
+func (u *UserVolume) PodGetFile(path string) (reader io.ReadCloser, err error) {
+	pt, err := GetPodTool(u.PodConn)
+	if err != nil {
+		logger.Errorf("err is %s", err)
+	}
+	var fileP string
+	fileNameWithSuffix := pathv1.Base(path)
+	fileType := pathv1.Ext(fileNameWithSuffix)
+	fileName := strings.TrimSuffix(fileNameWithSuffix, fileType)
+	logger.Debug("fileNameWithSuffix, fileType, fileName, path 分别是:", fileNameWithSuffix, fileType, fileName, path)
+	fileP = filepath.Join(os.TempDir(), fmt.Sprintf("%d", time.Now().UnixNano()))
+	err = os.MkdirAll(fileP, os.ModePerm)
+	if err != nil {
+		logger.Errorf("err is %s", err)
+	}
+	fileP = filepath.Join(fileP, fileName)
+	// fileP = filepath.Join(fileP, fileName+".tar")
+	err = pt.CopyFromPod(path, fileP)
+	if err != nil {
+		logger.Errorf("err is %s", err)
+	}
+	reader, err = os.Open(fileP)
+	os.RemoveAll(fileP)
+	logger.Debug("PodGetFile print reader err", reader, err)
+	return
+}
+
 func (u *UserVolume) GetFile(path string) (reader io.ReadCloser, err error) {
 	logger.Debug("GetFile path: ", path)
 	sftpFile, err := u.UserSftp.Open(filepath.Join(u.basePath, TrimPrefix(path)))
@@ -162,6 +279,30 @@ func (u *UserVolume) GetFile(path string) (reader io.ReadCloser, err error) {
 	}
 	// 屏蔽 sftp*File 的 WriteTo 方法，防止调用 sftp stat 命令
 	return &fileReader{sftpFile}, nil
+}
+
+func (u *UserVolume) PodUploadFile(dirPath, uploadPath, filename string, reader io.Reader) (elfinder.FileDir, error) {
+	var path string
+	switch {
+	case strings.Contains(uploadPath, filename):
+		path = filepath.Join(dirPath, TrimPrefix(uploadPath))
+	case uploadPath != "":
+		path = filepath.Join(dirPath, TrimPrefix(uploadPath), filename)
+	default:
+		path = filepath.Join(dirPath, filename)
+
+	}
+	logger.Debug("PodUploadFile upload file path: ", path, " ", filename, " ", uploadPath)
+	var rest elfinder.FileDir
+
+	pt, err := GetPodTool(u.PodConn)
+	pt.ExecConfig.Stdin = reader
+	err = pt.CopyToContainer(filename)
+
+	if err != nil {
+		return rest, err
+	}
+	return u.PodInfo(path)
 }
 
 func (u *UserVolume) UploadFile(dirPath, uploadPath, filename string, reader io.Reader) (elfinder.FileDir, error) {

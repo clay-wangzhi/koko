@@ -13,12 +13,17 @@ var rootPath, _ = os.Getwd()
 var DefaultVolume = LocalFileVolume{basePath: rootPath, Id: GenerateID(rootPath)}
 
 type Volume interface {
+	IsPods() bool
 	ID() string
+	PodInfo(path string) (FileDir, error)
 	Info(path string) (FileDir, error)
 	List(path string) []FileDir
+	PodFileList(path string) []FileDir
 	Parents(path string, dep int) []FileDir
+	PodGetFile(path string) (reader io.ReadCloser, err error)
 	GetFile(path string) (reader io.ReadCloser, err error)
 	UploadFile(dir, uploadPath, filename string, reader io.Reader) (FileDir, error)
+	PodUploadFile(dir, uploadPath, filename string, reader io.Reader) (FileDir, error)
 	UploadChunk(cid int, dirPath, uploadPath, filename string, rangeData ChunkRange, reader io.Reader) error
 	MergeChunk(cid, total int, dirPath, uploadPath, filename string) (FileDir, error)
 	MakeDir(dir, newDirname string) (FileDir, error)
@@ -27,7 +32,7 @@ type Volume interface {
 	Remove(path string) error
 	Paste(dir, filename, suffix string, reader io.ReadCloser) (FileDir, error)
 	RootFileDir() FileDir
-	Search(path, key string, mimes...string) ([]FileDir, error)
+	Search(path, key string, mimes ...string) ([]FileDir, error)
 }
 
 func NewLocalVolume(path string) *LocalFileVolume {
@@ -266,7 +271,7 @@ func (f *LocalFileVolume) RootFileDir() FileDir {
 	return resFDir
 }
 
-func (f *LocalFileVolume) Search(path, key string, mimes...string) (files []FileDir, err error) {
+func (f *LocalFileVolume) Search(path, key string, mimes ...string) (files []FileDir, err error) {
 	err = filepath.Walk(path, func(dirPath string, info os.FileInfo, err error) error {
 		if strings.Contains(info.Name(), key) {
 			resFDir := FileDir{}

@@ -31,7 +31,7 @@ func registerWebHandlers(jmsService *service.JMService, webSrv *httpd.Server) {
 	kokoGroup.Static("/assets", "./ui/dist/assets")
 	kokoGroup.StaticFile("/favicon.ico", "./ui/dist/favicon.ico")
 	kokoGroup.GET("/health/", webSrv.HealthStatusHandler)
-	eng.LoadHTMLFiles("./templates/elfinder/file_manager.html")
+	eng.LoadHTMLFiles("./templates/elfinder/file_manager.html", "./templates/elfinder/pod_file_manager.html")
 	wsGroup := kokoGroup.Group("/ws/")
 	{
 		wsGroup.Group("/terminal").Use(
@@ -86,11 +86,15 @@ func registerWebHandlers(jmsService *service.JMService, webSrv *httpd.Server) {
 		elfindlerGroup.GET("/sftp/:host/", func(ctx *gin.Context) {
 			hostId := ctx.Param("host")
 			if ok := common.ValidUUIDString(hostId); !ok {
-				ctx.AbortWithStatus(http.StatusBadRequest)
-				return
+				// ctx.AbortWithStatus(http.StatusBadRequest)
+				// ctx.AbortWithStatus()
+				metaData := webSrv.GenerateViewMeta(hostId)
+				ctx.HTML(http.StatusOK, "pod_file_manager.html", metaData)
+				// return
+			} else {
+				metaData := webSrv.GenerateViewMeta(hostId)
+				ctx.HTML(http.StatusOK, "file_manager.html", metaData)
 			}
-			metaData := webSrv.GenerateViewMeta(hostId)
-			ctx.HTML(http.StatusOK, "file_manager.html", metaData)
 		})
 		elfindlerGroup.Any("/connector/:host/", webSrv.SftpHostConnectorView)
 	}

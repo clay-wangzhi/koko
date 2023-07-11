@@ -343,6 +343,22 @@ func (u *UserSftpConn) generateSubFoldersFromAssets(assets ...model.Asset) map[s
 	return dirs
 }
 
+func (u *UserSftpConn) generateSubFoldersFromPod(containerOptions *ContainerOptions) map[string]os.FileInfo {
+	dirs := make(map[string]os.FileInfo)
+	matchFunc := func(s string) bool {
+		_, ok := dirs[s]
+		return ok
+	}
+	logger.Debug("print pod info", containerOptions)
+	folderName := containerOptions.PodName
+	folderName = findAvailableKeyByPaddingSuffix(matchFunc, folderName, paddingCharacter)
+	podDir := NewAssetDir(u.jmsService, u.User, u.logChan, WithFolderID(containerOptions.ContainerName),
+		WithFolderName(folderName), WitRemoteAddr(u.Addr))
+	dirs[folderName] = &podDir
+	logger.Debug("print dirs generateSubFoldersFromContainer", dirs)
+	return dirs
+}
+
 func (u *UserSftpConn) loopPushFTPLog() {
 	ftpLogList := make([]*model.FTPLog, 0, 1024)
 	maxRetry := 0
@@ -424,6 +440,22 @@ func NewUserSftpConnWithAssets(jmsService *service.JMService, user *model.User, 
 		jmsService: jmsService,
 	}
 	dirs := u.generateSubFoldersFromAssets(assets...)
+	u.Dirs = dirs
+	go u.loopPushFTPLog()
+	return &u
+}
+
+func NewUserContainerWithPod(jmsService *service.JMService, user *model.User, addr string, containerOptions *ContainerOptions) *UserSftpConn {
+	u := UserSftpConn{
+		User:       user,
+		Addr:       addr,
+		Dirs:       map[string]os.FileInfo{},
+		modeTime:   time.Now().UTC(),
+		logChan:    make(chan *model.FTPLog, 1024),
+		closed:     make(chan struct{}),
+		jmsService: jmsService,
+	}
+	dirs := u.generateSubFoldersFromPod(containerOptions)
 	u.Dirs = dirs
 	go u.loopPushFTPLog()
 	return &u

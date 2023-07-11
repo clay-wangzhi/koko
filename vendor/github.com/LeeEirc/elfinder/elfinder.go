@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/go-playground/form"
+	"github.com/jumpserver/koko/pkg/logger"
 )
 
 const (
@@ -130,15 +131,28 @@ func (elf *ElFinderConnector) open() {
 	if path == "" || path == "/" {
 		v = elf.defaultV
 		ret.Cwd = v.RootFileDir()
-		ret.Files = v.List(path)
+		if v.IsPods() {
+			ret.Files = v.PodFileList(path)
+		} else {
+			ret.Files = v.List(path)
+		}
 	} else {
 		v = elf.getVolume(IDAndTarget[0])
-		ret.Cwd, err = v.Info(path)
+		if v.IsPods() {
+			ret.Cwd, err = v.PodInfo(path)
+		} else {
+			ret.Cwd, err = v.Info(path)
+		}
 		if err != nil {
 			elf.res.Error = []string{errAccess, err.Error()}
 			return
 		}
-		ret.Files = v.List(path)
+		if v.IsPods() {
+			ret.Files = v.PodFileList(path)
+
+		} else {
+			ret.Files = v.List(path)
+		}
 	}
 	ret.Files = append(ret.Files, ret.Cwd)
 	if elf.req.Init {
@@ -161,13 +175,22 @@ func (elf *ElFinderConnector) open() {
 
 func (elf *ElFinderConnector) file() (read io.ReadCloser, filename string, err error) {
 	IDAndTarget := strings.Split(elf.req.Target, "_")
+	if len(IDAndTarget) == 1 {
+		IDAndTarget = strings.Split(elf.req.Targets[0], "_")
+	}
 	v := elf.getVolume(IDAndTarget[0])
 	path, err := elf.parseTarget(strings.Join(IDAndTarget[1:], "_"))
 	if err != nil {
 		return
 	}
 	filename = filepath.Base(path)
-	reader, err := v.GetFile(path)
+	var reader io.ReadCloser
+	if v.IsPods() {
+		reader, err = v.PodGetFile(path)
+		filename = filepath.Base(path)
+	} else {
+		reader, err = v.GetFile(path)
+	}
 	return reader, filename, err
 }
 
@@ -535,9 +558,16 @@ func (elf *ElFinderConnector) dispatch(rw http.ResponseWriter, req *http.Request
 	case "tree":
 		elf.tree()
 	case "file":
+		logger.Debug("req.Header is", req.Header)
 		readFile, filename, err := elf.file()
 		if req.Form.Get("cpath") != "" {
-			http.SetCookie(rw, &http.Cookie{Path: req.Form.Get("cpath"), Name: "elfdl" + req.Form.Get("reqid"), Value: "1"})
+			// rawq := u.RawQuery
+			rawq := req.URL.RawQuery
+			cpath := strings.Split(rawq, "cpath=")
+			cpath = strings.Split(cpath[1], "&reqid")
+			// http.SetCookie(rw, &http.Cookie{Path: req.Form.Get("cpath"), Name: "elfdl" + req.Form.Get("reqid"), Value: "1"})
+			http.SetCookie(rw, &http.Cookie{Path: cpath[0], Name: "elfdl" + req.Form.Get("reqid"), Value: "1"})
+			logger.Debug("cookie cpath is : ", req.Form.Get("cpath"))
 		}
 		if err != nil {
 			log.Printf("Download file err: %s", err)
@@ -546,8 +576,8 @@ func (elf *ElFinderConnector) dispatch(rw http.ResponseWriter, req *http.Request
 			_, _ = rw.Write([]byte(err.Error()))
 			return
 		} else {
-			mimeType := mime.TypeByExtension(filepath.Ext(filename))
-			rw.Header().Set("Content-Type", mimeType)
+			// rw.Header().Set("Content-Type", mimeType)
+			rw.Header().Set("Content-Type", "application/octet-stream")
 			if req.Form["download"] != nil {
 				rw.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s"`, filename))
 			} else {
@@ -557,6 +587,7 @@ func (elf *ElFinderConnector) dispatch(rw http.ResponseWriter, req *http.Request
 			defer readFile.Close()
 			if err == nil {
 				log.Printf("download file %s successful", filename)
+				// logger.Debug("res.Header is ", rw.Header().Get(""))
 				return
 			} else {
 				elf.res.Error = err.Error()
@@ -652,7 +683,15 @@ func (elf *ElFinderConnector) dispatch(rw http.ResponseWriter, req *http.Request
 				if len(elf.req.UploadPath) == len(files) && elf.req.UploadPath[i] != elf.req.Target {
 					uploadPath = elf.req.UploadPath[i]
 				}
-				err = v.UploadChunk(elf.req.Cid, dirpath, uploadPath, filename, data, f)
+				if strings.Contains(string(req.URL.Path), "namespace") {
+					result, err := v.PodUploadFile(dirpath, uploadPath, filename, f)
+					if err != nil {
+						errs = append(errs, err.Error())
+					}
+					added = append(added, result)
+				} else {
+					err = v.UploadChunk(elf.req.Cid, dirpath, uploadPath, filename, data, f)
+				}
 				if err != nil {
 					errs = append(errs, err.Error())
 				}
@@ -681,25 +720,40 @@ func (elf *ElFinderConnector) dispatch(rw http.ResponseWriter, req *http.Request
 
 			cid, _ := strconv.Atoi(ch[1])
 			total, _ := strconv.Atoi(ch[2])
-			result, err := v.MergeChunk(cid, total, dirpath, uploadPath, ch[3])
-			if err != nil {
-				errs = append(errs, err.Error())
-				break
+			if strings.Contains(string(req.URL.Path), "namespace") {
+				logger.Debug("chunk no")
+			} else {
+				result, err := v.MergeChunk(cid, total, dirpath, uploadPath, ch[3])
+				if err != nil {
+					errs = append(errs, err.Error())
+					break
+				}
+				added = append(added, result)
 			}
-			added = append(added, result)
+
 		} else {
 			for i, uploadFile := range files {
 				f, err := uploadFile.Open()
+				logger.Debug("open failed:", err)
 				uploadPath := ""
 				if len(elf.req.UploadPath) == len(files) && elf.req.UploadPath[i] != elf.req.Target {
 					uploadPath = elf.req.UploadPath[i]
 				}
-				result, err := v.UploadFile(dirpath, uploadPath, uploadFile.Filename, f)
-				if err != nil {
-					errs = append(errs, err.Error())
-					continue
+				if strings.Contains(string(req.URL.Path), "namespace") {
+					result, err := v.PodUploadFile(dirpath, uploadPath, uploadFile.Filename, f)
+					if err != nil {
+						errs = append(errs, err.Error())
+						continue
+					}
+					added = append(added, result)
+				} else {
+					result, err := v.UploadFile(dirpath, uploadPath, uploadFile.Filename, f)
+					if err != nil {
+						errs = append(errs, err.Error())
+						continue
+					}
+					added = append(added, result)
 				}
-				added = append(added, result)
 			}
 
 		}
@@ -708,39 +762,111 @@ func (elf *ElFinderConnector) dispatch(rw http.ResponseWriter, req *http.Request
 		}
 		elf.res.Added = added
 	case "zipdl":
-		switch elf.req.Download {
-		case "1":
-			var fileKey string
-			var filename string
-			var mimetype string
-			if len(elf.req.Targets) == 4 {
-				fileKey = elf.req.Targets[1]
-				filename = elf.req.Targets[2]
-				mimetype = elf.req.Targets[3]
-			}
-			var ret ElfResponse
-			if zipTmpPath, ok := getTmpFilePath(fileKey); ok {
-				zipFd, err := os.Open(zipTmpPath)
-				if err == nil {
-					rw.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s"`, filename))
-					rw.Header().Set("Content-Type", mimetype)
-					if _, err = io.Copy(rw, zipFd); err == nil {
-						_ = zipFd.Close()
-						delTmpFilePath(fileKey)
-						return
-					}
-					rw.Header().Del("Content-Disposition")
-					rw.Header().Del("Content-Type")
-					ret.Error = err
-					log.Println("zip download send err: ", err.Error())
+		logger.Debug("zip 里面的 req 为:", req.URL.Path)
+		if strings.Contains(string(req.URL.Path), "namespace") {
+			switch elf.req.Download {
+			case "1":
+				readFile, filename, err := elf.file()
+				if req.Form.Get("cpath") != "" {
+					http.SetCookie(rw, &http.Cookie{Path: req.Form.Get("cpath"), Name: "elfdl" + req.Form.Get("reqid"), Value: "1"})
 				}
-				log.Println("zip download err: ", err.Error())
-				ret.Error = err
+				if err != nil {
+					log.Printf("Download file err: %s", err)
+					elf.res.Error = err.Error()
+					rw.WriteHeader(403)
+					_, _ = rw.Write([]byte(err.Error()))
+					return
+				} else {
+					mimeType := mime.TypeByExtension(filepath.Ext(filename))
+					rw.Header().Set("Content-Type", mimeType)
+					if req.Form["download"] != nil {
+						rw.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s"`, filename))
+					} else {
+						rw.Header().Set("Content-Disposition", fmt.Sprintf(`inline; filename=="%s"`, filename))
+					}
+					_, err := io.Copy(rw, readFile)
+					defer readFile.Close()
+					if err == nil {
+						log.Printf("download file %s successful", filename)
+						return
+					} else {
+						elf.res.Error = err.Error()
+						log.Printf("download file %s err: %s", filename, err.Error())
+					}
+				}
+			default:
+				zipRes := make(map[string]string)
+				zipFileKey := GenerateTargetsMD5Key(elf.req.Targets...)
+				var ret ElfResponse
+				readFile, filename, err := elf.file()
+				if req.Form.Get("cpath") != "" {
+					http.SetCookie(rw, &http.Cookie{Path: req.Form.Get("cpath"), Name: "elfdl" + req.Form.Get("reqid"), Value: "1"})
+				}
+				if err != nil {
+					log.Printf("Download file err: %s", err)
+					elf.res.Error = err.Error()
+					rw.WriteHeader(403)
+					_, _ = rw.Write([]byte(err.Error()))
+					return
+				} else {
+					// mimeType := mime.TypeByExtension(filepath.Ext(filename))
+					// rw.Header().Set("Content-Type", mimeType)
+					// if req.Form["download"] != nil {
+					// 	rw.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s"`, filename))
+					// } else {
+					// 	rw.Header().Set("Content-Disposition", fmt.Sprintf(`inline; filename=="%s"`, filename))
+					// }
+					// _, err := io.Copy(rw, readFile)
+					defer readFile.Close()
+					if err == nil {
+						log.Printf("download file %s successful", filename)
+						zipRes["mime"] = "application/x-tar"
+						zipRes["file"] = zipFileKey
+						zipRes["name"] = filename
+						ret.Zipdl = zipRes
+						elf.res = &ret
+					} else {
+						elf.res.Error = err.Error()
+						log.Printf("download file %s err: %s", filename, err.Error())
+					}
+				}
 			}
-			elf.res = &ret
-		default:
-			elf.zipdl()
+		} else {
+			switch elf.req.Download {
+			case "1":
+				var fileKey string
+				var filename string
+				var mimetype string
+				if len(elf.req.Targets) == 4 {
+					fileKey = elf.req.Targets[1]
+					filename = elf.req.Targets[2]
+					mimetype = elf.req.Targets[3]
+				}
+				var ret ElfResponse
+				if zipTmpPath, ok := getTmpFilePath(fileKey); ok {
+					zipFd, err := os.Open(zipTmpPath)
+					if err == nil {
+						rw.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s"`, filename))
+						rw.Header().Set("Content-Type", mimetype)
+						if _, err = io.Copy(rw, zipFd); err == nil {
+							_ = zipFd.Close()
+							delTmpFilePath(fileKey)
+							return
+						}
+						rw.Header().Del("Content-Disposition")
+						rw.Header().Del("Content-Type")
+						ret.Error = err
+						log.Println("zip download send err: ", err.Error())
+					}
+					log.Println("zip download err: ", err.Error())
+					ret.Error = err
+				}
+				elf.res = &ret
+			default:
+				elf.zipdl()
+			}
 		}
+
 	case "abort":
 		rw.WriteHeader(http.StatusNoContent)
 		return
@@ -760,6 +886,7 @@ func (elf *ElFinderConnector) dispatch(rw http.ResponseWriter, req *http.Request
 	if err != nil {
 		log.Println("ResponseWriter Write err:", err.Error())
 	}
+
 }
 
 func (elf *ElFinderConnector) getVolume(vid string) Volume {

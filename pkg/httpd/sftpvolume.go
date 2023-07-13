@@ -15,6 +15,7 @@ import (
 	"github.com/pkg/sftp"
 	"k8s.io/client-go/kubernetes"
 
+	"github.com/jumpserver/koko/pkg/jms-sdk-go/common"
 	"github.com/jumpserver/koko/pkg/jms-sdk-go/model"
 	"github.com/jumpserver/koko/pkg/jms-sdk-go/service"
 	"github.com/jumpserver/koko/pkg/logger"
@@ -57,6 +58,7 @@ func NewUserVolume(jmsService *service.JMService, user *model.User, addr, hostId
 		containerOptions = &srvconn.ContainerOptions{
 			Host:          application.Attrs.Cluster,
 			Token:         systemUserAuthInfo.Token,
+			SystemUser:    systemUserAuthInfo.Name,
 			PodName:       podname,
 			Namespace:     namespace,
 			ContainerName: container,
@@ -266,8 +268,37 @@ func (u *UserVolume) PodGetFile(path string) (reader io.ReadCloser, err error) {
 		logger.Errorf("err is %s", err)
 	}
 	reader, err = os.Open(fileP)
+	operate := model.OperateDownload
+	if err != nil {
+		isSuccess := false
+		data := model.FTPLog{
+			User:       u.UserSftp.User.Username,
+			Hostname:   u.Homename,
+			OrgID:      "00000000-0000-0000-0000-000000000002",
+			SystemUser: u.PodConn.SystemUser,
+			RemoteAddr: u.UserSftp.Addr,
+			Operate:    operate,
+			Path:       "/tmp/" + fileNameWithSuffix,
+			DateStart:  common.NewNowUTCTime(),
+			IsSuccess:  isSuccess,
+		}
+		u.UserSftp.LogChan <- &data
+		return nil, err
+	}
 	os.RemoveAll(fileP)
-	logger.Debug("PodGetFile print reader err", reader, err)
+	isSuccess := true
+	data := model.FTPLog{
+		User:       u.UserSftp.User.Username,
+		Hostname:   u.Homename,
+		OrgID:      "00000000-0000-0000-0000-000000000002",
+		SystemUser: u.PodConn.SystemUser,
+		RemoteAddr: u.UserSftp.Addr,
+		Operate:    operate,
+		Path:       "/tmp/" + fileNameWithSuffix,
+		DateStart:  common.NewNowUTCTime(),
+		IsSuccess:  isSuccess,
+	}
+	u.UserSftp.LogChan <- &data
 	return
 }
 
@@ -299,9 +330,37 @@ func (u *UserVolume) PodUploadFile(dirPath, uploadPath, filename string, reader 
 	pt.ExecConfig.Stdin = reader
 	err = pt.CopyToContainer(filename)
 
+	operate := model.OperateUpload
 	if err != nil {
+		isSuccess := false
+		data := model.FTPLog{
+			User:       u.UserSftp.User.Username,
+			Hostname:   u.Homename,
+			OrgID:      "00000000-0000-0000-0000-000000000002",
+			SystemUser: u.PodConn.SystemUser,
+			RemoteAddr: u.UserSftp.Addr,
+			Operate:    operate,
+			Path:       "/tmp/" + filename,
+			DateStart:  common.NewNowUTCTime(),
+			IsSuccess:  isSuccess,
+		}
+		u.UserSftp.LogChan <- &data
 		return rest, err
 	}
+	isSuccess := true
+	data := model.FTPLog{
+		User:       u.UserSftp.User.Username,
+		Hostname:   u.Homename,
+		OrgID:      "00000000-0000-0000-0000-000000000002",
+		SystemUser: u.PodConn.SystemUser,
+		RemoteAddr: u.UserSftp.Addr,
+		Operate:    operate,
+		Path:       "/tmp/" + filename,
+		DateStart:  common.NewNowUTCTime(),
+		IsSuccess:  isSuccess,
+	}
+	logger.Debug("Debug sftpvolume.go 317 FTP 日志", data)
+	u.UserSftp.LogChan <- &data
 	return u.PodInfo(path)
 }
 

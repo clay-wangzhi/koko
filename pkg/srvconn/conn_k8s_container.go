@@ -131,6 +131,7 @@ type ContainerOption func(*ContainerOptions)
 type ContainerOptions struct {
 	Host          string
 	Token         string
+	SystemUser    string
 	PodName       string
 	Namespace     string
 	ContainerName string

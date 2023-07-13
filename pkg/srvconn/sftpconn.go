@@ -23,7 +23,7 @@ type UserSftpConn struct {
 	Dirs map[string]os.FileInfo
 
 	modeTime time.Time
-	logChan  chan *model.FTPLog
+	LogChan  chan *model.FTPLog
 
 	closed    chan struct{}
 	searchDir *SearchResultDir
@@ -317,7 +317,7 @@ func (u *UserSftpConn) generateSubFoldersFromNodeTree(nodeTrees model.NodeTreeLi
 			}
 			folderName := cleanFolderName(asset.Hostname)
 			folderName = findAvailableKeyByPaddingSuffix(matchFunc, folderName, paddingCharacter)
-			assetDir := NewAssetDir(u.jmsService, u.User, u.logChan, WithFolderID(asset.ID),
+			assetDir := NewAssetDir(u.jmsService, u.User, u.LogChan, WithFolderID(asset.ID),
 				WithFolderName(folderName), WitRemoteAddr(u.Addr))
 			dirs[folderName] = &assetDir
 		}
@@ -335,7 +335,7 @@ func (u *UserSftpConn) generateSubFoldersFromAssets(assets ...model.Asset) map[s
 		if asset.IsSupportProtocol(ProtocolSSH) {
 			folderName := cleanFolderName(asset.Hostname)
 			folderName = findAvailableKeyByPaddingSuffix(matchFunc, folderName, paddingCharacter)
-			assetDir := NewAssetDir(u.jmsService, u.User, u.logChan, WithFolderID(asset.ID),
+			assetDir := NewAssetDir(u.jmsService, u.User, u.LogChan, WithFolderID(asset.ID),
 				WithFolderName(folderName), WitRemoteAddr(u.Addr))
 			dirs[folderName] = &assetDir
 		}
@@ -352,7 +352,7 @@ func (u *UserSftpConn) generateSubFoldersFromPod(containerOptions *ContainerOpti
 	logger.Debug("print pod info", containerOptions)
 	folderName := containerOptions.PodName
 	folderName = findAvailableKeyByPaddingSuffix(matchFunc, folderName, paddingCharacter)
-	podDir := NewAssetDir(u.jmsService, u.User, u.logChan, WithFolderID(containerOptions.ContainerName),
+	podDir := NewAssetDir(u.jmsService, u.User, u.LogChan, WithFolderID(containerOptions.ContainerName),
 		WithFolderName(folderName), WitRemoteAddr(u.Addr))
 	dirs[folderName] = &podDir
 	logger.Debug("print dirs generateSubFoldersFromContainer", dirs)
@@ -375,7 +375,7 @@ func (u *UserSftpConn) loopPushFTPLog() {
 			if len(ftpLogList) == 0 {
 				continue
 			}
-		case logData, ok := <-u.logChan:
+		case logData, ok := <-u.LogChan:
 			if !ok {
 				return
 			}
@@ -420,7 +420,7 @@ func NewUserSftpConn(jmsService *service.JMService, user *model.User, addr strin
 		Addr:       addr,
 		Dirs:       map[string]os.FileInfo{},
 		modeTime:   time.Now().UTC(),
-		logChan:    make(chan *model.FTPLog, 1024),
+		LogChan:    make(chan *model.FTPLog, 1024),
 		closed:     make(chan struct{}),
 		jmsService: jmsService,
 	}
@@ -435,7 +435,7 @@ func NewUserSftpConnWithAssets(jmsService *service.JMService, user *model.User, 
 		Addr:       addr,
 		Dirs:       map[string]os.FileInfo{},
 		modeTime:   time.Now().UTC(),
-		logChan:    make(chan *model.FTPLog, 1024),
+		LogChan:    make(chan *model.FTPLog, 1024),
 		closed:     make(chan struct{}),
 		jmsService: jmsService,
 	}
@@ -451,7 +451,7 @@ func NewUserContainerWithPod(jmsService *service.JMService, user *model.User, ad
 		Addr:       addr,
 		Dirs:       map[string]os.FileInfo{},
 		modeTime:   time.Now().UTC(),
-		logChan:    make(chan *model.FTPLog, 1024),
+		LogChan:    make(chan *model.FTPLog, 1024),
 		closed:     make(chan struct{}),
 		jmsService: jmsService,
 	}
